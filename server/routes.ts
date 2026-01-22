@@ -1,9 +1,44 @@
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { runPreflightScan } from "./vps/preflight";
 import { deployToVPS, checkVPSServices } from "./vps/deploy";
 import { getGitHubUser, createRepository, getRepositories, checkRepositoryExists, syncToGitHub, getLastCommit } from "./github";
 import type { PreflightResult, DeploymentStatus } from "@shared/schema";
+
+// Auth middleware - requires X-Admin-Key header
+function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+  const adminKey = process.env.ADMIN_API_KEY;
+  const providedKey = req.headers['x-admin-key'] as string;
+  
+  if (!adminKey) {
+    return res.status(500).json({ error: "ADMIN_API_KEY not configured on server" });
+  }
+  
+  if (!providedKey || providedKey !== adminKey) {
+    return res.status(401).json({ error: "Unauthorized - invalid or missing admin key" });
+  }
+  
+  next();
+}
+
+// Rate limiter for GitHub sync (max 1 per 10 minutes)
+let lastGitHubSync: number = 0;
+const SYNC_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+function rateLimitGitHubSync(req: Request, res: Response, next: NextFunction) {
+  const now = Date.now();
+  const timeSinceLastSync = now - lastGitHubSync;
+  
+  if (lastGitHubSync > 0 && timeSinceLastSync < SYNC_COOLDOWN_MS) {
+    const waitSeconds = Math.ceil((SYNC_COOLDOWN_MS - timeSinceLastSync) / 1000);
+    return res.status(429).json({ 
+      error: `Rate limited. Please wait ${waitSeconds} seconds before syncing again.`,
+      retryAfter: waitSeconds
+    });
+  }
+  
+  next();
+}
 
 // In-memory state
 let lastPreflightResult: PreflightResult | null = null;
@@ -32,6 +67,20 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Apply admin auth to all /api routes except health
+  app.use("/api", (req, res, next) => {
+    // Skip auth for public health check
+    if (req.path === "/health") {
+      return next();
+    }
+    requireAdminAuth(req, res, next);
+  });
+
+  // Public health check (no auth required)
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
   // Get deployment status
   app.get("/api/status", (req, res) => {
     res.json({
@@ -255,10 +304,11 @@ export async function registerRoutes(
     }
   });
 
-  // Sync project to GitHub
-  app.post("/api/github/sync", async (req, res) => {
+  // Sync project to GitHub (with rate limiting)
+  app.post("/api/github/sync", rateLimitGitHubSync, async (req, res) => {
     try {
       const result = await syncToGitHub();
+      lastGitHubSync = Date.now(); // Update timestamp after successful sync
       res.json(result);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
