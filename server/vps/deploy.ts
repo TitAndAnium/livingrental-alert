@@ -214,8 +214,8 @@ export function generateFetcherDockerfile(): string {
 WORKDIR /app
 
 # Install Node.js dependencies
-COPY package*.json ./
-RUN npm ci --only=production
+COPY package.json ./
+RUN npm install --omit=dev
 
 # Copy application code
 COPY . .
@@ -250,16 +250,29 @@ const app = express();
 app.use(express.json());
 
 const FETCHER_SECRET = process.env.X_FETCHER_SECRET || '';
+const ALLOWED_URL_PREFIXES = process.env.ALLOWED_URL_PREFIXES 
+  ? process.env.ALLOWED_URL_PREFIXES.split(',').map(p => p.trim())
+  : null;
 const PORT = process.env.PORT || 3001;
 
-// Middleware to check secret
+// Middleware to check secret - STRICT: reject if secret missing or wrong
 function checkSecret(req, res, next) {
-  const secret = req.headers['x-fetcher-secret'];
-  if (!FETCHER_SECRET || secret === FETCHER_SECRET) {
-    next();
-  } else {
-    res.status(401).json({ error: 'Unauthorized' });
+  if (!FETCHER_SECRET) {
+    return res.status(500).json({ error: 'FETCHER_SECRET not configured - access denied' });
   }
+  
+  const secret = req.headers['x-fetcher-secret'];
+  if (!secret || secret !== FETCHER_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized - invalid or missing secret' });
+  }
+  
+  next();
+}
+
+// Optional SSRF protection - check URL against allowlist
+function checkUrlAllowed(url) {
+  if (!ALLOWED_URL_PREFIXES) return true;
+  return ALLOWED_URL_PREFIXES.some(prefix => url.startsWith(prefix));
 }
 
 // Health check endpoint
@@ -278,6 +291,11 @@ app.post('/fetch', checkSecret, async (req, res) => {
 
   if (!url) {
     return res.status(400).json({ error: 'url is required' });
+  }
+
+  // SSRF protection
+  if (!checkUrlAllowed(url)) {
+    return res.status(403).json({ error: 'URL not in allowed prefixes list' });
   }
 
   try {
