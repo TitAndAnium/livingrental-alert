@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { queryClient, apiRequest } from "@/lib/queryClient";
+import { queryClient, apiRequest, getAdminKey, setAdminKey, clearAdminKey } from "@/lib/queryClient";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +29,9 @@ import {
   Send,
   Copy,
   Home,
+  Lock,
+  LogOut,
+  Key,
 } from "lucide-react";
 import type { PreflightResult, DeploymentStatus } from "@shared/schema";
 
@@ -99,7 +102,157 @@ function ServiceCard({
   );
 }
 
+function AdminLogin({ onLogin }: { onLogin: () => void }) {
+  const { toast } = useToast();
+  const [inputKey, setInputKey] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleLogin = async () => {
+    if (!inputKey.trim()) {
+      toast({
+        title: "Key Required",
+        description: "Please enter your admin API key",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/status", {
+        headers: { "X-Admin-Key": inputKey.trim() },
+      });
+      
+      if (res.status === 401) {
+        toast({
+          title: "Invalid Key",
+          description: "The admin key you entered is incorrect",
+          variant: "destructive",
+        });
+        return;
+      }
+      
+      if (res.ok) {
+        setAdminKey(inputKey.trim());
+        toast({
+          title: "Logged In",
+          description: "Welcome to LivingRental Alert Dashboard",
+        });
+        onLogin();
+      }
+    } catch {
+      toast({
+        title: "Connection Error",
+        description: "Could not connect to server",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+      <Card className="w-full max-w-md">
+        <CardHeader className="text-center">
+          <div className="mx-auto mb-4 p-4 rounded-full bg-primary/10 w-fit">
+            <Lock className="w-8 h-8 text-primary" />
+          </div>
+          <CardTitle className="text-2xl">LivingRental Alert</CardTitle>
+          <CardDescription>
+            Enter your admin API key to access the dashboard
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="admin-key">Admin API Key</Label>
+            <Input
+              id="admin-key"
+              type="password"
+              placeholder="Enter your admin key..."
+              value={inputKey}
+              onChange={(e) => setInputKey(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+              data-testid="input-admin-key"
+            />
+          </div>
+          <Button 
+            className="w-full" 
+            onClick={handleLogin}
+            disabled={isLoading}
+            data-testid="button-login"
+          >
+            {isLoading ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Verifying...
+              </>
+            ) : (
+              <>
+                <Key className="w-4 h-4 mr-2" />
+                Login
+              </>
+            )}
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function Dashboard() {
+  const { toast } = useToast();
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+
+  // Check if user has valid admin key on mount
+  useEffect(() => {
+    const checkAuth = async () => {
+      const key = getAdminKey();
+      if (!key) {
+        setIsAuthenticated(false);
+        return;
+      }
+      
+      try {
+        const res = await fetch("/api/status", {
+          headers: { "X-Admin-Key": key },
+        });
+        setIsAuthenticated(res.ok);
+      } catch {
+        setIsAuthenticated(false);
+      }
+    };
+    checkAuth();
+  }, []);
+
+  const handleLogout = () => {
+    clearAdminKey();
+    setIsAuthenticated(false);
+    queryClient.clear();
+    toast({
+      title: "Logged Out",
+      description: "You have been logged out",
+    });
+  };
+
+  // Show loading while checking auth
+  if (isAuthenticated === null) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  // Show login if not authenticated
+  if (!isAuthenticated) {
+    return <AdminLogin onLogin={() => setIsAuthenticated(true)} />;
+  }
+
+  return <AuthenticatedDashboard onLogout={handleLogout} />;
+}
+
+function AuthenticatedDashboard({ onLogout }: { onLogout: () => void }) {
   const { toast } = useToast();
   const [ntfyTopic, setNtfyTopic] = useState("strijps");
   const [ntfyMessage, setNtfyMessage] = useState("Test notification from LivingRental Alert");
@@ -233,6 +386,15 @@ export default function Dashboard() {
                   Missing Secrets
                 </Badge>
               )}
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={onLogout}
+                data-testid="button-logout"
+              >
+                <LogOut className="w-4 h-4 mr-1" />
+                Logout
+              </Button>
             </div>
           </div>
         </div>
